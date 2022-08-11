@@ -1,5 +1,4 @@
 const path = require('path');
-const yargs = require('yargs');
 const chokidar = require('chokidar');
 const { default: PQueue } = require('p-queue');
 
@@ -42,7 +41,7 @@ const _notifyOfThemePreview = (filePath, accountId) => {
 const notifyOfThemePreview = debounce(_notifyOfThemePreview, 1000);
 
 async function uploadFile(accountId, file, dest, options) {
-  const src = yargs.argv.src;
+  const src = options.src;
   const fieldOptions = options.fieldOptions;
   if (!isAllowedExtension(file)) {
     logger.debug(`Skipping ${file} due to unsupported extension`);
@@ -52,16 +51,12 @@ async function uploadFile(accountId, file, dest, options) {
     logger.debug(`Skipping ${file} due to an ignore rule`);
     return;
   }
-  const processFieldsJsOpt = yargs.argv.processFieldsJs;
-  const processFieldsJs =
-    isProcessableFieldsJs(src, file) && processFieldsJsOpt;
+  const processFieldsJs = isProcessableFieldsJs(src, file);
   let fieldsJs;
   if (processFieldsJs) {
-    fieldsJs = new FieldsJs(src, file, undefined, fieldOptions);
-    const outputPath = await fieldsJs.getOutputPathPromise();
+    fieldsJs = await new FieldsJs(src, file, undefined, fieldOptions).init();
     if (fieldsJs.rejected) return;
 
-    fieldsJs.outputPath = outputPath;
     dest = path.join(path.dirname(dest), 'fields.json');
   }
 
@@ -177,6 +172,7 @@ function watch(
   watcher.on('add', async filePath => {
     const destPath = getDesignManagerPath(filePath);
     const uploadPromise = uploadFile(accountId, filePath, destPath, {
+      src,
       mode,
       fieldOptions,
     });
@@ -186,7 +182,7 @@ function watch(
   if (remove) {
     const deleteFileOrFolder = type => filePath => {
       // If it's a fields.js file that is in a module folder or the root, then ignore because it will not exist on the server.
-      if (isProcessableFieldsJs(src, filePath) && yargs.argv.processFieldsJs) {
+      if (isProcessableFieldsJs(src, filePath)) {
         return;
       }
 
@@ -224,6 +220,7 @@ function watch(
   watcher.on('change', async filePath => {
     const destPath = getDesignManagerPath(filePath);
     const uploadPromise = uploadFile(accountId, filePath, destPath, {
+      src,
       mode,
       fieldOptions,
     });

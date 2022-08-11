@@ -1,6 +1,11 @@
 const fs = require('fs-extra');
 const os = require('os');
 const path = require('path');
+const yargs = require('yargs');
+const babel = require('@babel/core');
+const babelTransformCJS = require('@babel/plugin-transform-modules-commonjs');
+const tmp = require('tmp');
+const semver = require('semver');
 const escapeRegExp = require('./escapeRegExp');
 const { isModuleFolderChild } = require('../modules');
 const { logger } = require('../logger');
@@ -27,6 +32,13 @@ class FieldsJs {
         : rootWriteDir;
   }
 
+  async init() {
+    const outputPath = await this.getOutputPathPromise();
+    console.log(outputPath);
+    this.outputPath = this.rejected ? undefined : outputPath;
+    return this;
+  }
+
   /**
    * Converts a fields.js file into a fields.json file, writes, and returns of fields.json
    * @param {string} file - The path of the fields.js javascript file.
@@ -35,12 +47,13 @@ class FieldsJs {
    */
   convertFieldsJs(writeDir) {
     const filePath = this.filePath;
+    const baseName = path.basename(filePath);
     const dirName = path.dirname(filePath);
     const cwd = getCwd();
     console.log(cwd, dirName);
     logger.info(
       i18n(`${i18nKey}.converting`, {
-        src: dirName + '/fields.js',
+        src: dirName + `/${baseName}`,
         dest: dirName + '/fields.json',
       })
     );
@@ -59,31 +72,50 @@ class FieldsJs {
        * Further, it is expected that devs use await on any asyncronous calls.
        * But fieldsArray _might_ not be a Promise. In order to be sure that it is, we use Promise.resolve.
        */
-      const fieldsArray = require(filePath)(this.fieldOptions);
-      return Promise.resolve(fieldsArray)
-        .then(fields => {
-          if (!Array.isArray(fields)) {
-            throw new SyntaxError(`${filePath} does not return an array.`);
-          }
 
-          const finalPath = path.join(writeDir, '/fields.json');
-          const json = fieldsArrayToJson(fields);
-          fs.outputFileSync(finalPath, json);
-          logger.success(
-            i18n(`${i18nKey}.converted`, {
-              src: dirName + '/fields.js',
-              dest: dirName + '/fields.json',
-            })
-          );
-          // Switch back to the original directory.
-          process.chdir(cwd);
-          return finalPath;
-        })
-        .catch(e => {
-          process.chdir(cwd);
-          // Errors caught by this could be caused by the users field.js, so just print the whole error for them.
-          logger.error(e);
-        });
+      let fieldsPromise;
+
+      // Dynamic import was added to Node in 13.2.0.
+      if (semver.gte(process.version, '13.2.0')) {
+        // eslint-disable-next-line
+        fieldsPromise = import(filePath)
+          .then(fieldsFunc => fieldsFunc.default(this.fieldOptions))
+          .then(fieldsArray => Promise.resolve(fieldsArray));
+      } else {
+        if (getExt(filePath) == 'mjs') {
+          logger.error('.mjs files are only supported when using Node 13.2.0+');
+          this.rejected = true;
+          return;
+        }
+        fieldsPromise = Promise.resolve(require(filePath)(this.fieldOptions));
+      }
+
+      return fieldsPromise.then(fieldsArray =>
+        Promise.resolve(fieldsArray)
+          .then(fields => {
+            if (!Array.isArray(fields)) {
+              throw new SyntaxError(`${filePath} does not return an array.`);
+            }
+
+            const finalPath = path.join(writeDir, '/fields.json');
+            const json = fieldsArrayToJson(fields);
+            fs.outputFileSync(finalPath, json);
+            logger.success(
+              i18n(`${i18nKey}.converted`, {
+                src: dirName + `/${baseName}`,
+                dest: dirName + '/fields.json',
+              })
+            );
+            // Switch back to the original directory.
+            process.chdir(cwd);
+            return finalPath;
+          })
+          .catch(e => {
+            process.chdir(cwd);
+            // Errors caught by this could be caused by the users field.js, so just print the whole error for them.
+            logger.error(e);
+          })
+      );
     } catch (e) {
       process.chdir(cwd);
       this.rejected = true;
@@ -149,16 +181,30 @@ function fieldsArrayToJson(fields) {
   return JSON.stringify(fields);
 }
 
+/*
+ * Checks if filePath matches any of the valid javascript fields names: fields.js/.mjs/.cjs
+ */
+function isFieldsJs(filePath) {
+  const allowedFieldsNames = ['fields.js', 'fields.mjs', 'fields.cjs'];
+}
+
 /**
- * Determines if file is a processable fields.js file (i.e., if it is called 'fields.js' and in a root or in a module folder)
+ * Determines if file is a processable fields.js file i.e., if it is called
+ * 'fields.js' and in a root or in a module folder, and if processFieldsJs flag is true.
+ * @param {string} rootDir - The root directory of the project where the file is
+ * @param {string} filePath - The file to check
  */
 function isProcessableFieldsJs(rootDir, filePath) {
+  const allowedFieldsNames = ['fields.js', 'fields.mjs', 'fields.cjs'];
   const regex = new RegExp(`^${escapeRegExp(rootDir)}`);
   const relativePath = filePath.replace(regex, '');
   const baseName = path.basename(filePath);
   const inModuleFolder = isModuleFolderChild({ path: filePath, isLocal: true });
+  const processFieldsJs = yargs.argv.processFieldsJs;
   return (
-    baseName == 'fields.js' && (inModuleFolder || relativePath == '/fields.js')
+    processFieldsJs &&
+    allowedFieldsNames.includes(baseName) &&
+    (inModuleFolder || relativePath == '/fields.js')
   );
 }
 
